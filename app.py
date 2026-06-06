@@ -38,6 +38,14 @@ users_db     = {}
 appointments = {}
 appt_counter = [0]
 booked_times = {}
+# Har bir shifokor uchun kunlik navbat raqami: {doc_id: {date: count}}
+doctor_counters = {}
+
+def get_next_number(doc_id, date):
+    if doc_id not in doctor_counters: doctor_counters[doc_id] = {}
+    if date not in doctor_counters[doc_id]: doctor_counters[doc_id][date] = 0
+    doctor_counters[doc_id][date] += 1
+    return doctor_counters[doc_id][date]
 ratings      = []  # [{uid, appt_id, rating, comment}]
 
 def get_s(uid): return user_state.get(str(uid), {})
@@ -152,9 +160,14 @@ def kb_rating():
 # ─── GURUHGA YUBORISH ────────────────────────────────────────
 async def send_to_group(bot, appt):
     now = now_tz().strftime("%d.%m.%Y %H:%M")
-    msg = (f"🏥 *Yangi navbat — {CLINIC_NAME}*\n━━━━━━━━━━━━━━\n"
+    doc_spec = DOCTORS[appt['doc_id']]['spec_uz']
+    queue_num = appt.get('queue_num', '?')
+    msg = (f"🏥 *Yangi navbat #{appt['id']} — {CLINIC_NAME}*\n━━━━━━━━━━━━━━\n"
            f"👤 *Ism:* {appt['name']}\n📞 *Tel:* {appt['phone']}\n━━━━━━━━━━━━━━\n"
-           f"👨‍⚕️ *Shifokor:* {appt['doctor']}\n📅 *Sana:* {appt['date']}\n🕐 *Vaqt:* {appt['time']}\n"
+           f"👨‍⚕️ *{appt['doctor']}* ({doc_spec})\n"
+           f"📅 *Sana:* {appt['date']}\n"
+           f"🕐 *Vaqt:* {appt['time']}\n"
+           f"🔢 *{doc_spec}da {queue_num}-navbat*\n"
            f"━━━━━━━━━━━━━━\n🕐 {now}")
     await bot.send_message(chat_id=GROUP_ID, text=msg, parse_mode="Markdown", reply_markup=kb_registrar(appt['id']))
 
@@ -518,8 +531,9 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             doc=DOCTORS[s["doc_id"]]
             appt_counter[0]+=1
             aid=appt_counter[0]
+            queue_num = get_next_number(s["doc_id"], s["date"])
             appt={"id":aid,"uid":uid,"name":user["name"],"phone":user["phone"],
-                  "doctor":doc["name"],"doc_id":s["doc_id"],"date":s["date"],"time":s["time"],"status":"pending"}
+                  "doctor":doc["name"],"doc_id":s["doc_id"],"date":s["date"],"time":s["time"],"status":"pending","queue_num":queue_num}
             appointments[aid]=appt
             book_time(s["doc_id"],s["date"],s["time"])
             await send_to_group(ctx.bot,appt)
