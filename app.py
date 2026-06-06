@@ -4,6 +4,7 @@ import pytz
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from flask import Flask, request
+import threading, time
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,13 +19,13 @@ CLINIC_PHONE   = "+998 91 166 66 96\n📱 +998 90 995 17 77"
 CLINIC_ADDRESS = "Toshkent sh., Dormon"
 
 DOCTORS = {
-    "1": {"name": "Dr. Ashurov B.A.",    "spec_uz": "Terapevt",     "spec_ru": "Терапевт",     "times": ["09:00","09:30","10:00","10:30","11:00","11:30","14:00","14:30","15:00","15:30"]},
-    "2": {"name": "Dr. Xolmatova M.S.",  "spec_uz": "Kardiolog",    "spec_ru": "Кардиолог",    "times": ["09:00","10:00","11:00","14:00","15:00","16:00"]},
-    "3": {"name": "Dr. Karimov J.R.",    "spec_uz": "Nevropatolog", "spec_ru": "Невропатолог", "times": ["09:00","09:30","10:00","11:00","14:00","15:00"]},
-    "4": {"name": "Dr. Yusupova N.K.",   "spec_uz": "Ginekolog",    "spec_ru": "Гинеколог",    "times": ["09:00","10:00","11:00","14:00","15:00"]},
-    "5": {"name": "Dr. Nazarov F.B.",    "spec_uz": "Jarroh",       "spec_ru": "Хирург",       "times": ["10:00","11:00","14:00","15:00","16:00"]},
-    "6": {"name": "Dr. Tosheva G.M.",    "spec_uz": "Pediatr",      "spec_ru": "Педиатр",      "times": ["09:00","10:00","11:00","14:00","15:00"]},
-    "7": {"name": "Dr. Rahimov A.T.",    "spec_uz": "Ortoped",      "spec_ru": "Ортопед",      "times": ["10:00","11:00","14:00","15:00","16:00"]},
+    "1": {"name": "Dr. Ashurov B.A.",   "spec_uz": "Terapevt",     "spec_ru": "Терапевт",     "times": ["09:00","09:30","10:00","10:30","11:00","11:30","14:00","14:30","15:00","15:30"]},
+    "2": {"name": "Dr. Xolmatova M.S.", "spec_uz": "Kardiolog",    "spec_ru": "Кардиолог",    "times": ["09:00","10:00","11:00","14:00","15:00","16:00"]},
+    "3": {"name": "Dr. Karimov J.R.",   "spec_uz": "Nevropatolog", "spec_ru": "Невропатолог", "times": ["09:00","09:30","10:00","11:00","14:00","15:00"]},
+    "4": {"name": "Dr. Yusupova N.K.",  "spec_uz": "Ginekolog",    "spec_ru": "Гинеколог",    "times": ["09:00","10:00","11:00","14:00","15:00"]},
+    "5": {"name": "Dr. Nazarov F.B.",   "spec_uz": "Jarroh",       "spec_ru": "Хирург",       "times": ["10:00","11:00","14:00","15:00","16:00"]},
+    "6": {"name": "Dr. Tosheva G.M.",   "spec_uz": "Pediatr",      "spec_ru": "Педиатр",      "times": ["09:00","10:00","11:00","14:00","15:00"]},
+    "7": {"name": "Dr. Rahimov A.T.",   "spec_uz": "Ortoped",      "spec_ru": "Ортопед",      "times": ["10:00","11:00","14:00","15:00","16:00"]},
 }
 
 SERVICES = {
@@ -34,10 +35,10 @@ SERVICES = {
 
 user_state   = {}
 users_db     = {}
-appointments = {}  # {appt_id: {...}}
+appointments = {}
 appt_counter = [0]
-# Band vaqtlar: {doc_id: {date: [time, ...]}}
 booked_times = {}
+ratings      = []  # [{uid, appt_id, rating, comment}]
 
 def get_s(uid): return user_state.get(str(uid), {})
 def set_s(uid, s): user_state[str(uid)] = s
@@ -68,17 +69,35 @@ def unbook_time(doc_id, date, time):
     try: booked_times[doc_id][date].remove(time)
     except: pass
 
+def get_user_appointments(uid):
+    return [a for a in appointments.values() if a["uid"]==uid and a["status"] in ["pending","confirmed"]]
+
 # ─── KLAVIATURALAR ───────────────────────────────────────────
 def kb_lang():
     return ReplyKeyboardMarkup([["🇺🇿 O'zbekcha","🇷🇺 Русский"]], resize_keyboard=True, one_time_keyboard=True)
 
 def kb_menu(lang):
     if lang=="ru":
-        return ReplyKeyboardMarkup([["📅 Записаться на приём"],["👨‍⚕️ Наши врачи","💰 Услуги и цены"],["📍 Адрес","📞 Контакты"]], resize_keyboard=True)
-    return ReplyKeyboardMarkup([["📅 Navbat olish"],["👨‍⚕️ Shifokorlar","💰 Xizmatlar va narxlar"],["📍 Manzil","📞 Bog'lanish"]], resize_keyboard=True)
+        return ReplyKeyboardMarkup([
+            ["📅 Записаться на приём"],
+            ["📋 Мои записи","👨‍⚕️ Наши врачи"],
+            ["💰 Услуги и цены","📍 Адрес"],
+            ["📞 Контакты"]
+        ], resize_keyboard=True)
+    return ReplyKeyboardMarkup([
+        ["📅 Navbat olish"],
+        ["📋 Mening navbatlarim","👨‍⚕️ Shifokorlar"],
+        ["💰 Xizmatlar va narxlar","📍 Manzil"],
+        ["📞 Bog'lanish"]
+    ], resize_keyboard=True)
 
 def kb_admin():
-    return ReplyKeyboardMarkup([["📋 Bugungi navbatlar","📊 Statistika"],["👨‍⚕️ Shifokor qo'shish","👤 Admin qo'shish"],["🔙 Chiqish"]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([
+        ["📋 Bugungi navbatlar","📊 Statistika"],
+        ["📢 Xabar yuborish","👨‍⚕️ Shifokor qo'shish"],
+        ["👤 Admin qo'shish","⭐ Baholar"],
+        ["🔙 Chiqish"]
+    ], resize_keyboard=True)
 
 def kb_back(lang):
     return ReplyKeyboardMarkup([["🔙 Orqaga" if lang=="uz" else "🔙 Назад"]], resize_keyboard=True, one_time_keyboard=True)
@@ -112,95 +131,162 @@ def kb_contact(lang):
     return ReplyKeyboardMarkup([[btn]], resize_keyboard=True, one_time_keyboard=True)
 
 def kb_registrar(appt_id):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{appt_id}"),
-         InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel_{appt_id}")]
-    ])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"confirm_{appt_id}"),
+        InlineKeyboardButton("❌ Bekor qilish", callback_data=f"cancel_{appt_id}")
+    ]])
+
+def kb_cancel_appt(appt_id, lang):
+    txt = "❌ Bekor qilish" if lang=="uz" else "❌ Отменить"
+    return InlineKeyboardMarkup([[InlineKeyboardButton(txt, callback_data=f"user_cancel_{appt_id}")]])
+
+def kb_rating():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⭐ 1", callback_data="rate_1"),
+        InlineKeyboardButton("⭐ 2", callback_data="rate_2"),
+        InlineKeyboardButton("⭐ 3", callback_data="rate_3"),
+        InlineKeyboardButton("⭐ 4", callback_data="rate_4"),
+        InlineKeyboardButton("⭐ 5", callback_data="rate_5"),
+    ]])
 
 # ─── GURUHGA YUBORISH ────────────────────────────────────────
 async def send_to_group(bot, appt):
     now = now_tz().strftime("%d.%m.%Y %H:%M")
-    msg = (
-        f"🏥 *Yangi navbat — {CLINIC_NAME}*\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"👤 *Ism:* {appt['name']}\n"
-        f"📞 *Tel:* {appt['phone']}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"👨‍⚕️ *Shifokor:* {appt['doctor']}\n"
-        f"📅 *Sana:* {appt['date']}\n"
-        f"🕐 *Vaqt:* {appt['time']}\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🕐 {now}"
-    )
-    await bot.send_message(
-        chat_id=GROUP_ID, text=msg,
-        parse_mode="Markdown",
-        reply_markup=kb_registrar(appt['id'])
-    )
+    msg = (f"🏥 *Yangi navbat — {CLINIC_NAME}*\n━━━━━━━━━━━━━━\n"
+           f"👤 *Ism:* {appt['name']}\n📞 *Tel:* {appt['phone']}\n━━━━━━━━━━━━━━\n"
+           f"👨‍⚕️ *Shifokor:* {appt['doctor']}\n📅 *Sana:* {appt['date']}\n🕐 *Vaqt:* {appt['time']}\n"
+           f"━━━━━━━━━━━━━━\n🕐 {now}")
+    await bot.send_message(chat_id=GROUP_ID, text=msg, parse_mode="Markdown", reply_markup=kb_registrar(appt['id']))
 
-# ─── CALLBACK (Tasdiqlash/Bekor qilish) ──────────────────────
+# ─── ESLATMA TIZIMI ──────────────────────────────────────────
+def reminder_worker():
+    while True:
+        try:
+            now = now_tz()
+            today = now.strftime("%d.%m.%Y")
+            for appt in list(appointments.values()):
+                if appt["status"] != "confirmed": continue
+                if appt["date"] != today: continue
+                if appt.get("reminded"): continue
+                try:
+                    appt_time = datetime.strptime(f"{today} {appt['time']}", "%d.%m.%Y %H:%M")
+                    appt_time = TZ.localize(appt_time)
+                    diff = (appt_time - now).total_seconds() / 60
+                    if 55 <= diff <= 65:
+                        appt["reminded"] = True
+                        asyncio.run_coroutine_threadsafe(
+                            send_reminder(appt), loop
+                        )
+                except: pass
+        except: pass
+        time.sleep(60)
+
+async def send_reminder(appt):
+    try:
+        await ptb_app.bot.send_message(
+            chat_id=appt["uid"],
+            text=(f"⏰ *Eslatma!*\n\n"
+                  f"Bugun soat *{appt['time']}* da navbatingiz bor.\n"
+                  f"👨‍⚕️ {appt['doctor']}\n\n"
+                  f"📍 {CLINIC_ADDRESS}\n"
+                  f"Vaqtida kelishingizni so'raymiz! 🙏"),
+            parse_mode="Markdown"
+        )
+    except: pass
+
+# ─── BAHOLASH YUBORISH ───────────────────────────────────────
+async def send_rating_request(bot, appt):
+    try:
+        lang = users_db.get(str(appt["uid"]), {}).get("lang","uz")
+        text = (f"⭐ *Xizmatimizni baholang!*\n\n"
+                f"👨‍⚕️ {appt['doctor']}\n"
+                f"📅 {appt['date']}\n\n"
+                f"Sizning fikringiz bizga muhim!") if lang=="uz" else (
+                f"⭐ *Оцените наш сервис!*\n\n"
+                f"👨‍⚕️ {appt['doctor']}\n"
+                f"📅 {appt['date']}\n\n"
+                f"Ваше мнение важно для нас!")
+        set_s(appt["uid"], {**get_s(appt["uid"]), "rating_appt": appt["id"]})
+        await bot.send_message(chat_id=appt["uid"], text=text, parse_mode="Markdown", reply_markup=kb_rating())
+    except: pass
+
+# ─── CALLBACK ────────────────────────────────────────────────
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cb   = update.callback_query
     data = cb.data
+    uid  = cb.from_user.id
     await cb.answer()
 
-    appt_id = int(data.split("_")[1])
-    appt    = appointments.get(appt_id)
-    if not appt:
-        await cb.edit_message_text("❌ Navbat topilmadi")
-        return
+    # Registratura tasdiqlashi
+    if data.startswith("confirm_") or data.startswith("cancel_"):
+        parts    = data.split("_")
+        action   = parts[0]
+        appt_id  = int(parts[1])
+        appt     = appointments.get(appt_id)
+        if not appt:
+            await cb.edit_message_text("❌ Navbat topilmadi"); return
 
-    if data.startswith("confirm_"):
-        if appt["status"] == "confirmed":
-            await cb.answer("Allaqachon tasdiqlangan!", show_alert=True)
-            return
-        appt["status"] = "confirmed"
         admin_name = cb.from_user.first_name or "Registratura"
-        # Guruh xabarini yangilash
-        await cb.edit_message_text(
-            cb.message.text + f"\n\n✅ *Tasdiqlandi* — {admin_name}",
-            parse_mode="Markdown"
-        )
-        # Mijozga xabar
-        try:
-            await ctx.bot.send_message(
-                chat_id=appt["uid"],
-                text=(
-                    f"✅ *Navbatingiz tasdiqlandi!*\n\n"
-                    f"👨‍⚕️ {appt['doctor']}\n"
-                    f"📅 {appt['date']} — soat {appt['time']}\n\n"
-                    f"📍 {CLINIC_ADDRESS}\n"
-                    f"📞 {CLINIC_PHONE}\n\n"
-                    f"⏰ Iltimos vaqtida keling!"
-                ),
-                parse_mode="Markdown"
-            )
-        except: pass
 
-    elif data.startswith("cancel_"):
-        if appt["status"] == "cancelled":
-            await cb.answer("Allaqachon bekor qilingan!", show_alert=True)
-            return
+        if action=="confirm":
+            if appt["status"]=="confirmed":
+                await cb.answer("Allaqachon tasdiqlangan!", show_alert=True); return
+            appt["status"] = "confirmed"
+            await cb.edit_message_text(cb.message.text+f"\n\n✅ *Tasdiqlandi* — {admin_name}", parse_mode="Markdown")
+            try:
+                await ctx.bot.send_message(chat_id=appt["uid"],
+                    text=(f"✅ *Navbatingiz tasdiqlandi!*\n\n"
+                          f"👨‍⚕️ {appt['doctor']}\n"
+                          f"📅 {appt['date']} — soat {appt['time']}\n\n"
+                          f"📍 {CLINIC_ADDRESS}\n📞 {CLINIC_PHONE}\n\n"
+                          f"⏰ Vaqtida keling!"),
+                    parse_mode="Markdown")
+            except: pass
+
+        elif action=="cancel":
+            if appt["status"]=="cancelled":
+                await cb.answer("Allaqachon bekor qilingan!", show_alert=True); return
+            appt["status"] = "cancelled"
+            unbook_time(appt["doc_id"], appt["date"], appt["time"])
+            await cb.edit_message_text(cb.message.text+f"\n\n❌ *Bekor qilindi* — {admin_name}", parse_mode="Markdown")
+            try:
+                await ctx.bot.send_message(chat_id=appt["uid"],
+                    text=(f"❌ *Navbatingiz bekor qilindi*\n\n"
+                          f"👨‍⚕️ {appt['doctor']}\n"
+                          f"📅 {appt['date']} — {appt['time']}\n\n"
+                          f"Qayta navbat olish uchun /start bosing\n📞 {CLINIC_PHONE}"),
+                    parse_mode="Markdown")
+            except: pass
+
+    # Foydalanuvchi navbatni bekor qilishi
+    elif data.startswith("user_cancel_"):
+        appt_id = int(data.split("_")[2])
+        appt    = appointments.get(appt_id)
+        if not appt or appt["uid"]!=uid:
+            await cb.answer("❌ Topilmadi", show_alert=True); return
+        if appt["status"]=="cancelled":
+            await cb.answer("Allaqachon bekor qilingan!", show_alert=True); return
         appt["status"] = "cancelled"
         unbook_time(appt["doc_id"], appt["date"], appt["time"])
-        admin_name = cb.from_user.first_name or "Registratura"
-        await cb.edit_message_text(
-            cb.message.text + f"\n\n❌ *Bekor qilindi* — {admin_name}",
-            parse_mode="Markdown"
-        )
+        await cb.edit_message_text(f"❌ Navbat bekor qilindi\n\n👨‍⚕️ {appt['doctor']}\n📅 {appt['date']} — {appt['time']}")
         try:
-            await ctx.bot.send_message(
-                chat_id=appt["uid"],
-                text=(
-                    f"❌ *Navbatingiz bekor qilindi*\n\n"
-                    f"👨‍⚕️ {appt['doctor']}\n"
-                    f"📅 {appt['date']} — {appt['time']}\n\n"
-                    f"Qayta navbat olish uchun /start bosing\n"
-                    f"📞 {CLINIC_PHONE}"
-                ),
-                parse_mode="Markdown"
-            )
+            await ctx.bot.send_message(chat_id=GROUP_ID,
+                text=f"❌ Mijoz navbatni bekor qildi\n👤 {appt['name']}\n📅 {appt['date']} — {appt['time']}")
         except: pass
+
+    # Baholash
+    elif data.startswith("rate_"):
+        star    = int(data.split("_")[1])
+        s       = get_s(uid)
+        appt_id = s.get("rating_appt")
+        stars   = "⭐" * star
+        ratings.append({"uid": uid, "appt_id": appt_id, "rating": star})
+        set_s(uid, {**s, "rating_appt": None, "rating_step": "comment", "rating_star": star})
+        lang = users_db.get(str(uid), {}).get("lang","uz")
+        await cb.edit_message_text(
+            f"{stars} Rahmat!\n\nIzoh qoldirishni xohlaysizmi? (yoki /start bosing)" if lang=="uz" else
+            f"{stars} Спасибо!\n\nХотите оставить комментарий? (или нажмите /start)"
+        )
 
 # ─── ASOSIY HANDLER ──────────────────────────────────────────
 async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -230,31 +316,82 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except: await msg.reply_text("❌ Xato")
         return
 
+    # Izoh (baholashdan keyin)
+    if s.get("rating_step")=="comment":
+        ratings[-1]["comment"] = text
+        set_s(uid,{**s,"rating_step":None})
+        star = s.get("rating_star",5)
+        # Adminga yuborish
+        for aid in ADMIN_IDS:
+            try:
+                await ctx.bot.send_message(chat_id=aid,
+                    text=f"⭐ *Yangi baho*\n\n{'⭐'*star} ({star}/5)\n"
+                         f"👤 {users_db.get(str(uid),{}).get('name','—')}\n"
+                         f"💬 {text}")
+            except: pass
+        await msg.reply_text("🙏 Fikringiz uchun rahmat!", reply_markup=kb_menu(lang))
+        return
+
     # Admin panel
     if s.get("admin_mode"):
         if text=="🔙 Chiqish":
             set_s(uid,{"lang":lang})
-            await msg.reply_text("Asosiy menyu:", reply_markup=kb_menu(lang))
-            return
+            await msg.reply_text("Asosiy menyu:", reply_markup=kb_menu(lang)); return
+
         if text=="📋 Bugungi navbatlar":
             today=now_tz().strftime("%d.%m.%Y")
-            ta=[a for a in appointments.values() if a["date"]==today]
-            if not ta:
-                await msg.reply_text("Bugun navbat yo'q"); return
+            ta=sorted([a for a in appointments.values() if a["date"]==today], key=lambda x: x["time"])
+            if not ta: await msg.reply_text("Bugun navbat yo'q"); return
             result=f"📋 Bugun ({today}) — {len(ta)} ta:\n\n"
-            for a in sorted(ta, key=lambda x: x["time"]):
-                status = "✅" if a["status"]=="confirmed" else "❌" if a["status"]=="cancelled" else "⏳"
-                result+=f"{status} {a['time']} — {a['name']}\n📞 {a['phone']}\n👨‍⚕️ {a['doctor']}\n\n"
+            for a in ta:
+                st="✅" if a["status"]=="confirmed" else "❌" if a["status"]=="cancelled" else "⏳"
+                result+=f"{st} {a['time']} — {a['name']}\n📞 {a['phone']}\n👨‍⚕️ {a['doctor']}\n\n"
             await msg.reply_text(result); return
+
         if text=="📊 Statistika":
             today=now_tz().strftime("%d.%m.%Y")
             today_c=len([a for a in appointments.values() if a["date"]==today])
             confirmed=len([a for a in appointments.values() if a["status"]=="confirmed"])
-            await msg.reply_text(f"📊 Statistika\n\n👥 Ro'yxatdan o'tganlar: {len(users_db)}\n📅 Bugungi navbatlar: {today_c}\n✅ Tasdiqlangan: {confirmed}\n📦 Jami: {len(appointments)}\n👤 Adminlar: {len(ADMIN_IDS)}")
-            return
+            avg_rating=round(sum(r["rating"] for r in ratings)/len(ratings),1) if ratings else "—"
+            await msg.reply_text(
+                f"📊 *Statistika*\n\n"
+                f"👥 Ro'yxatdan o'tganlar: {len(users_db)}\n"
+                f"📅 Bugungi navbatlar: {today_c}\n"
+                f"✅ Tasdiqlangan: {confirmed}\n"
+                f"📦 Jami navbatlar: {len(appointments)}\n"
+                f"⭐ O'rtacha baho: {avg_rating}\n"
+                f"👤 Adminlar: {len(ADMIN_IDS)}",
+                parse_mode="Markdown"); return
+
+        if text=="⭐ Baholar":
+            if not ratings: await msg.reply_text("Hozircha baho yo'q"); return
+            avg=round(sum(r["rating"] for r in ratings)/len(ratings),1)
+            result=f"⭐ *Baholar* — O'rtacha: {avg}/5\n\n"
+            for r in ratings[-10:]:
+                name=users_db.get(str(r["uid"]),{}).get("name","—")
+                result+=f"{'⭐'*r['rating']} — {name}\n"
+                if r.get("comment"): result+=f"💬 {r['comment']}\n"
+                result+="\n"
+            await msg.reply_text(result, parse_mode="Markdown"); return
+
+        if text=="📢 Xabar yuborish":
+            set_s(uid,{**s,"admin_step":"broadcast"})
+            await msg.reply_text(f"📢 Barcha {len(users_db)} ta foydalanuvchiga yuboriladigan xabarni yozing:"); return
+
+        if s.get("admin_step")=="broadcast":
+            count=0
+            for u_id in users_db:
+                try:
+                    await ctx.bot.send_message(chat_id=int(u_id), text=f"📢 {CLINIC_NAME}:\n\n{text}")
+                    count+=1
+                except: pass
+            set_s(uid,{**s,"admin_step":None})
+            await msg.reply_text(f"✅ {count} ta foydalanuvchiga yuborildi!", reply_markup=kb_admin()); return
+
         if text=="👤 Admin qo'shish":
             set_s(uid,{**s,"admin_step":"add_admin"})
             await msg.reply_text("Yangi admin Telegram ID:"); return
+
         if s.get("admin_step")=="add_admin":
             try:
                 ADMIN_IDS.append(int(text))
@@ -262,6 +399,7 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(f"✅ {text} admin qilindi!", reply_markup=kb_admin())
             except: await msg.reply_text("❌ Raqam kiriting")
             return
+
         if text=="👨‍⚕️ Shifokor qo'shish":
             set_s(uid,{**s,"admin_step":"doc_name"})
             await msg.reply_text("Shifokor to'liq ismi:"); return
@@ -280,7 +418,7 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         name=msg.from_user.first_name or "Do'stim"
         if str(uid) not in users_db:
             set_s(uid,{"lang":"uz","step":"get_name"})
-            await msg.reply_text(f"Salom, {name}! 👋\n\nRo'yxatdan o'tish uchun to'liq ismingizni kiriting:")
+            await msg.reply_text(f"Salom, {name}! 👋\n\nTo'liq ismingizni kiriting:")
         else:
             set_s(uid,{"lang":"uz","step":"menu"})
             await msg.reply_text(f"🏥 {CLINIC_NAME}\n\nSalom, {users_db[str(uid)]['name']}!", reply_markup=kb_menu("uz"))
@@ -318,7 +456,17 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if text in ["🔙 Orqaga","🔙 Назад"]:
         set_s(uid,{"lang":lang,"step":"menu"})
-        await msg.reply_text("Asosiy menyu:" if lang=="uz" else "Главное меню:", reply_markup=kb_menu(lang))
+        await msg.reply_text("Asosiy menyu:" if lang=="uz" else "Главное меню:", reply_markup=kb_menu(lang)); return
+
+    # Mening navbatlarim
+    if text in ["📋 Mening navbatlarim","📋 Мои записи"]:
+        my_appts = get_user_appointments(uid)
+        if not my_appts:
+            await msg.reply_text("Sizda hozircha navbat yo'q" if lang=="uz" else "У вас нет записей"); return
+        for a in my_appts:
+            st = "⏳ Kutilmoqda" if a["status"]=="pending" else "✅ Tasdiqlangan"
+            txt = f"{st}\n👨‍⚕️ {a['doctor']}\n📅 {a['date']} — {a['time']}"
+            await msg.reply_text(txt, reply_markup=kb_cancel_appt(a["id"], lang))
         return
 
     # Navbat olish
@@ -327,8 +475,7 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             set_s(uid,{"lang":lang,"step":"get_name"})
             await msg.reply_text("Avval ismingizni kiriting:" if lang=="uz" else "Введите имя:"); return
         set_s(uid,{**s,"step":"choose_doctor"})
-        await msg.reply_text("👨‍⚕️ Shifokorni tanlang:" if lang=="uz" else "👨‍⚕️ Выберите врача:", reply_markup=kb_doctors(lang))
-        return
+        await msg.reply_text("👨‍⚕️ Shifokorni tanlang:" if lang=="uz" else "👨‍⚕️ Выберите врача:", reply_markup=kb_doctors(lang)); return
 
     if s.get("step")=="choose_doctor":
         chosen=None
@@ -338,35 +485,32 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not chosen:
             await msg.reply_text("Shifokorni tanlang:", reply_markup=kb_doctors(lang)); return
         set_s(uid,{**s,"step":"choose_date","doc_id":chosen[0],"doc_name":chosen[1]["name"]})
-        await msg.reply_text("📅 Sanani tanlang:" if lang=="uz" else "📅 Выберите дату:", reply_markup=kb_dates(lang))
-        return
+        await msg.reply_text("📅 Sanani tanlang:" if lang=="uz" else "📅 Выберите дату:", reply_markup=kb_dates(lang)); return
 
     if s.get("step")=="choose_date":
         if text not in get_dates():
             await msg.reply_text("Sanani tanlang:", reply_markup=kb_dates(lang)); return
         free=get_free_times(s["doc_id"], text)
         if not free:
-            await msg.reply_text("😔 Bu kun barcha vaqtlar band. Boshqa kun tanlang:" if lang=="uz" else "😔 Все места заняты. Выберите другой день:", reply_markup=kb_dates(lang)); return
+            await msg.reply_text("😔 Bu kun barcha vaqtlar band. Boshqa kun tanlang:" if lang=="uz" else "😔 Все места заняты:", reply_markup=kb_dates(lang)); return
         set_s(uid,{**s,"step":"choose_time","date":text})
-        await msg.reply_text("🕐 Vaqtni tanlang:" if lang=="uz" else "🕐 Выберите время:", reply_markup=kb_times(free,lang))
-        return
+        await msg.reply_text("🕐 Vaqtni tanlang:" if lang=="uz" else "🕐 Выберите время:", reply_markup=kb_times(free,lang)); return
 
     if s.get("step")=="choose_time":
         free=get_free_times(s["doc_id"], s["date"])
         if text not in free:
             if not free:
-                await msg.reply_text("😔 Barcha vaqtlar band. Boshqa kun tanlang:", reply_markup=kb_dates(lang))
+                await msg.reply_text("😔 Barcha vaqtlar band:", reply_markup=kb_dates(lang))
                 set_s(uid,{**s,"step":"choose_date"}); return
             await msg.reply_text("Vaqtni tanlang:", reply_markup=kb_times(free,lang)); return
         set_s(uid,{**s,"step":"confirm","time":text})
         doc=DOCTORS[s["doc_id"]]
         spec=doc["spec_uz"] if lang=="uz" else doc["spec_ru"]
         user=users_db[str(uid)]
-        summary=(f"📋 *Navbat ma'lumotlari:*\n\n" if lang=="uz" else f"📋 *Данные записи:*\n\n")
+        summary=f"📋 *Navbat ma'lumotlari:*\n\n" if lang=="uz" else f"📋 *Данные записи:*\n\n"
         summary+=f"👤 {user['name']}\n📞 {user['phone']}\n👨‍⚕️ {doc['name']} ({spec})\n📅 {s['date']}\n🕐 {text}\n\n"
-        summary+=("✅ Tasdiqlaysizmi?" if lang=="uz" else "✅ Подтверждаете?")
-        await msg.reply_text(summary, parse_mode="Markdown", reply_markup=kb_confirm(lang))
-        return
+        summary+="✅ Tasdiqlaysizmi?" if lang=="uz" else "✅ Подтверждаете?"
+        await msg.reply_text(summary, parse_mode="Markdown", reply_markup=kb_confirm(lang)); return
 
     if s.get("step")=="confirm":
         if text in ["✅ Tasdiqlash","✅ Подтвердить"]:
@@ -377,16 +521,12 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             appt={"id":aid,"uid":uid,"name":user["name"],"phone":user["phone"],
                   "doctor":doc["name"],"doc_id":s["doc_id"],"date":s["date"],"time":s["time"],"status":"pending"}
             appointments[aid]=appt
-            book_time(s["doc_id"], s["date"], s["time"])
-            await send_to_group(ctx.bot, appt)
+            book_time(s["doc_id"],s["date"],s["time"])
+            await send_to_group(ctx.bot,appt)
             set_s(uid,{"lang":lang,"step":"menu"})
             await msg.reply_text(
-                f"⏳ *Navbatingiz registraturaga yuborildi!*\n\n"
-                f"👨‍⚕️ {doc['name']}\n📅 {s['date']} — {s['time']}\n\n"
-                f"Tasdiqlangandan so'ng xabar olasiz 📲" if lang=="uz" else
-                f"⏳ *Ваша запись отправлена в регистратуру!*\n\n"
-                f"👨‍⚕️ {doc['name']}\n📅 {s['date']} — {s['time']}\n\n"
-                f"После подтверждения вы получите уведомление 📲",
+                f"⏳ *Navbatingiz yuborildi!*\n\n👨‍⚕️ {doc['name']}\n📅 {s['date']} — {s['time']}\n\nTasdiqlangandan so'ng xabar olasiz 📲" if lang=="uz" else
+                f"⏳ *Запись отправлена!*\n\n👨‍⚕️ {doc['name']}\n📅 {s['date']} — {s['time']}\n\nПосле подтверждения вы получите уведомление 📲",
                 parse_mode="Markdown", reply_markup=kb_menu(lang))
         else:
             set_s(uid,{"lang":lang,"step":"menu"})
@@ -414,7 +554,7 @@ async def handle_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("🌐 Tilni tanlang / Выберите язык:", reply_markup=kb_lang())
 
 
-# ─── Flask ───────────────────────────────────────────────────
+# ─── Flask + PTB ─────────────────────────────────────────────
 flask_app = Flask(__name__)
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
@@ -432,8 +572,12 @@ async def init():
 
 loop.run_until_complete(init())
 
+# Eslatma thread
+reminder_thread = threading.Thread(target=reminder_worker, daemon=True)
+reminder_thread.start()
+
 @flask_app.route("/", methods=["GET"])
-def index(): return f"{CLINIC_NAME} — Ishlayapti!", 200
+def index(): return f"{CLINIC_NAME} — Ishlayapti! ✅", 200
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
